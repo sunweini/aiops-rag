@@ -7,7 +7,7 @@
 
 ## 增量索引 + 单文件索引
 
-- [设计文档](specs/2026-06-03-incremental-index-design.md) — mtime snapshot 增量 + index-file 单文件 + rag-wiki 目录
+- [设计文档](specs/2026-06-03-incremental-index-design.md) — mtime snapshot 增量 + index-file 单文件 + wiki/ 目录
 - [实现计划](plans/2026-06-03-incremental-index-implementation.md) — 6 任务实现计划
 
 ## AIOps RAG 初始设计
