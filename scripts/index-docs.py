@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Incremental indexer for rag-wiki.
+"""Incremental indexer for wiki.
 
-Default: scan rag-wiki/, mtime diff, only re-index changed .md files.
+Default: scan wiki/, mtime diff, only re-index changed .md files.
 --full:  delete ES index + rebuild all + regenerate snapshot.
 --file <relpath>: single-file index.
 
-Snapshot: rag-wiki/.index_snapshot.json — {relpath: mtime}
+Snapshot: wiki/.index_snapshot.json — {relpath: mtime}
 """
 
 import argparse
@@ -138,7 +138,7 @@ async def _do_incremental(dir_path: str):
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Incremental index rag-wiki")
+    parser = argparse.ArgumentParser(description="Incremental index wiki")
     parser.add_argument("--full", action="store_true", help="Full rebuild")
     parser.add_argument("--file", type=str, help="Single file relative to wiki root")
     args = parser.parse_args()
@@ -160,7 +160,7 @@ async def main():
         full = os.path.normpath(os.path.join(WIKI_DIR, rel))
         wiki_root = os.path.normpath(WIKI_DIR)
         if not full.startswith(wiki_root):
-            print(f"错误: 路径必须在 rag-wiki/ 内: {rel}")
+            print(f"错误: 路径必须在 wiki/ 内: {rel}")
             sys.exit(1)
         if not rel.endswith(".md"):
             print(f"错误: 只支持 .md 文件: {rel}")
