@@ -1,0 +1,663 @@
+#!/usr/bin/env python3
+"""AIOps RAG CLI — query + maintenance.
+
+QUERY:
+  aiops-query query 'nginx 502 排查'
+  aiops-query topology svc_nginx
+  aiops-query cluster svc_nginx
+  aiops-query impact host_app_01
+  aiops-query path svc_nginx 3
+  aiops-query circular
+  aiops-query service-docs svc_nginx
+  aiops-query host-docs host_nginx_01
+  aiops-query doc-services svc_nginx_tech-arch
+  aiops-query doc-hosts svc_nginx_company_tech-arch
+  aiops-query health
+  aiops-query sync-health
+  aiops-query metrics
+  aiops-query update-node <Label> <node_id> <key> <value>
+
+MAINTENANCE:
+  aiops-query index                  # 增量索引
+  aiops-query index --full           # 强制全量
+  aiops-query index-file <relpath>   # 单文件索引
+  aiops-query update-node <Label> <node_id> <key> <value>
+  aiops-query write-sop <svc_id> <sop_type> [--file <path> | '<body>'] [--tags 'tag1,tag2']
+  aiops-query write-tech <svc_id> [--file <path> | '<body>'] [--tags 'tag1,tag2']
+  aiops-query write-incident <svc_id> [--file <path> | '<body>'] [--tags 'tag1,tag2']
+  aiops-query add-service --id <svc_id> --name '<name>' --host <host_id> [--port <n>] [--call <target>:<proto>:<port>]
+  aiops-query delete-service <svc_id>
+  aiops-query add-host --id <host_id> --name '<name>' --ip <ip> [--os '<os>']
+  aiops-query index
+"""
+
+import json
+import os
+import shutil
+import sys
+import urllib.request
+from datetime import date
+
+API = "http://localhost:8001/api/v1"
+
+
+def _api_post(path: str, data: dict = None) -> dict:
+    """POST JSON to RAG API, return parsed response."""
+    body = json.dumps(data or {}).encode()
+    req = urllib.request.Request(
+        f"{API}{path}",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=60)
+        return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        err = json.loads(e.read()) if e.fp else {"detail": str(e)}
+        print(f"API error [{path}]: {err.get('detail', e)}", file=sys.stderr)
+        sys.exit(1)
+
+# --- project root detection ---
+for _cand in [
+    os.path.expanduser("~/.openclaw/workspace-shared/rag"),
+    "/root/.openclaw/workspace-shared/rag"
+]:
+    if os.path.isdir(_cand):
+        RAG_ROOT = _cand
+        break
+else:
+    RAG_ROOT = os.getcwd()
+
+WIKI_DIR = os.path.expanduser("~/.openclaw/workspace-shared/rag-wiki")
+DOCS_DIR = WIKI_DIR
+TOPO_FILE = os.path.join(DOCS_DIR, "topology", "call-graph.yml")
+SERVICES_DIR = os.path.join(DOCS_DIR, "services")
+INCIDENTS_DIR = os.path.join(DOCS_DIR, "incidents")
+
+
+def _ensure_dirs():
+    for d in [SERVICES_DIR, INCIDENTS_DIR, os.path.join(DOCS_DIR, "topology"), os.path.join(DOCS_DIR, "hosts")]:
+        os.makedirs(d, exist_ok=True)
+
+
+def _svc_name(service_id):
+    """Get service name from topology or return service_id as fallback."""
+    if os.path.exists(TOPO_FILE):
+        import yaml
+        with open(TOPO_FILE) as f:
+            data = yaml.safe_load(f) or {}
+        for s in data.get("services", []):
+            if s["id"] == service_id:
+                return s.get("name", service_id)
+    return service_id
+
+
+def _topo_data():
+    import yaml
+    if os.path.exists(TOPO_FILE):
+        with open(TOPO_FILE) as f:
+            return yaml.safe_load(f) or {"services": [], "hosts": []}
+    return {"services": [], "hosts": []}
+
+
+def _save_topo(data):
+    import yaml
+    os.makedirs(os.path.dirname(TOPO_FILE), exist_ok=True)
+    with open(TOPO_FILE, "w") as f:
+        yaml.dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+
+
+def _parse_write_args(args, svc_pos):
+    """Parse write command args supporting --file and --tags."""
+    body = ""
+    tags = None
+    body_parts = []
+    i = svc_pos + 1
+    while i < len(args):
+        if args[i] == "--file" and i + 1 < len(args):
+            try:
+                with open(args[i + 1], "r") as f:
+                    body = f.read()
+            except Exception as e:
+                print(f"读取文件失败: {e}")
+                sys.exit(1)
+            i += 2
+        elif args[i] == "--tags" and i + 1 < len(args):
+            tags = args[i + 1]
+            i += 2
+        else:
+            body_parts.append(args[i])
+            i += 1
+    if not body:
+        body = " ".join(body_parts)
+    return body, tags
+
+
+def _index(full=False):
+    """Incremental index or full rebuild via RAG API."""
+    if full:
+        _api_post("/reload-topology", {})
+    _api_post("/index-all", {"full": full})
+
+
+# ============================================================
+# TEMPLATES — loaded from files
+# ============================================================
+
+_TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
+
+def _load_template(name):
+    """Load template from templates/<name>.md. Returns raw text."""
+    path = os.path.join(_TEMPLATE_DIR, f"{name}.md")
+    if not os.path.exists(path):
+        print(f"警告: 模板文件不存在: {path}")
+        return ""
+    with open(path) as f:
+        return f.read()
+
+SOP_TEMPLATE = _load_template("sop")
+TECH_TEMPLATE = _load_template("tech")
+INCIDENT_TEMPLATE = _load_template("incident")
+
+
+# ============================================================
+# QUERY
+# ============================================================
+
+def query(question):
+    data = json.dumps({"query": question}).encode()
+    req = urllib.request.Request(
+        f"{API}/query",
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    resp = urllib.request.urlopen(req, timeout=60)
+    print(json.loads(resp.read())["answer"])
+
+
+def topology(service_id):
+    resp = urllib.request.urlopen(f"{API}/topology?service_id={service_id}", timeout=10)
+    print(json.dumps(json.loads(resp.read()), indent=2, ensure_ascii=False))
+
+
+def impact(host_id):
+    resp = urllib.request.urlopen(f"{API}/impact?host_id={host_id}", timeout=10)
+    r = json.loads(resp.read())
+    print(f"影响分析 [{host_id}]:")
+    print(f"  直接: {[s['name'] for s in r.get('direct', [])]}")
+    print(f"  下游: {[s['name'] for s in r.get('downstream', [])]}")
+    print(f"  上游: {[s['name'] for s in r.get('upstream', [])]}")
+
+
+def graph_path(service_id, depth=3):
+    resp = urllib.request.urlopen(f"{API}/graph/path?service_id={service_id}&depth={depth}", timeout=10)
+    for hop in json.loads(resp.read()).get("path", []):
+        print(f"  {hop['from_name']} --[{hop['rel']}]--> {hop['to_name']}")
+
+
+def circular():
+    resp = urllib.request.urlopen(f"{API}/graph/circular", timeout=10)
+    deps = json.loads(resp.read()).get("circular_dependencies", [])
+    print(f"循环依赖: {deps if deps else '无'}")
+
+
+def health():
+    resp = urllib.request.urlopen(f"{API}/health", timeout=5)
+    print(json.dumps(json.loads(resp.read()), indent=2))
+
+
+def metrics():
+    resp = urllib.request.urlopen(f"{API}/metrics", timeout=5)
+    r = json.loads(resp.read())
+    print(f"运行时间: {r['uptime_seconds']}s")
+    for path, stats in sorted(r.get("endpoints", {}).items()):
+        print(f"  {path}: {stats['total']}次, {stats['errors']}错误, "
+              f"平均{stats['avg_latency_ms']}ms, 最慢{stats['max_latency_ms']}ms")
+
+
+# ============================================================
+# MAINTENANCE
+# ============================================================
+
+def write_sop(service_id, sop_type, body, tags=None, host_id=None):
+    _ensure_dirs()
+    name = _svc_name(service_id)
+    today = date.today().isoformat()
+
+    if not host_id:
+        data = _topo_data()
+        for s in data.get("services", []):
+            if s["id"] == service_id:
+                host_id = s.get("deploys_on", "")
+                break
+
+    tag_list = [sop_type]
+    if tags:
+        tag_list.extend(t.strip() for t in tags.split(",") if t.strip())
+    tags_yaml = "\n".join(f"  - {t}" for t in tag_list)
+
+    content = SOP_TEMPLATE.format(
+        title=f"{name} {sop_type} SOP",
+        doc_type="sop",
+        service_id=service_id,
+        service_name=name,
+        sop_type=sop_type,
+        host_id=host_id or service_id,
+        date=today,
+        body=body,
+    )
+    content = content.replace(f"  - {sop_type}", tags_yaml)
+
+    dirpath = os.path.join(SERVICES_DIR, f"{service_id}-{name}")
+    os.makedirs(dirpath, exist_ok=True)
+    fname = f"sop-{sop_type.replace(' ', '-')}.md"
+    path = os.path.join(dirpath, fname)
+    with open(path, "w") as f:
+        f.write(content)
+    print(f"SOP 写入: {path}")
+    _index()
+
+
+def write_tech(service_id, body, tags=None):
+    _ensure_dirs()
+    name = _svc_name(service_id)
+    today = date.today().isoformat()
+
+    if not tags:
+        tags = "技术文档"
+    tags_yaml = "\n".join(f"  - {t.strip()}" for t in tags.split(",") if t.strip())
+
+    content = TECH_TEMPLATE.format(
+        title=f"{name} 技术架构",
+        service_id=service_id,
+        service_name=name,
+        tags="{tags_placeholder}",
+        date=today,
+        body=body,
+    )
+    content = content.replace("tags: {tags_placeholder}", f"tags:\n{tags_yaml}")
+
+    dirpath = os.path.join(SERVICES_DIR, f"{service_id}-{name}")
+    os.makedirs(dirpath, exist_ok=True)
+    path = os.path.join(dirpath, "tech-arch.md")
+    with open(path, "w") as f:
+        f.write(content)
+    print(f"技术文档写入: {path}")
+    _index()
+
+
+def write_incident(service_id, body, tags=None, host_id=None):
+    _ensure_dirs()
+    name = _svc_name(service_id)
+    today = date.today().isoformat()
+
+    if not host_id:
+        data = _topo_data()
+        for s in data.get("services", []):
+            if s["id"] == service_id:
+                host_id = s.get("deploys_on", "")
+                break
+
+    # Infer related services from topology
+    related = []
+    data = _topo_data()
+    for s in data.get("services", []):
+        if s["id"] == service_id:
+            for c in s.get("calls", []):
+                related.append(c["target"])
+            break
+    # Also add services that call this one
+    for s in data.get("services", []):
+        for c in s.get("calls", []):
+            if c.get("target") == service_id and s["id"] not in related:
+                related.append(s["id"])
+
+    # Merge default tags with user-supplied tags
+    tag_set = ["故障", "复盘"]
+    if tags:
+        for t in tags.split(","):
+            t = t.strip()
+            if t and t not in tag_set:
+                tag_set.append(t)
+    tags_yaml = "\n".join(f"  - {t}" for t in tag_set)
+
+    content = INCIDENT_TEMPLATE.format(
+        title=f"{name} 故障复盘 - {today}",
+        service_id=service_id,
+        service_name=name,
+        related_services=related if related else [""],
+        host_id=host_id or service_id,
+        date=today,
+        body=body,
+    )
+    # Replace default tags block with merged tags
+    default_tags = "  - 故障\n  - 复盘"
+    content = content.replace(default_tags, tags_yaml)
+
+    path = os.path.join(INCIDENTS_DIR, f"{today}-{name}.md")
+    with open(path, "w") as f:
+        f.write(content)
+    print(f"故障记录写入: {path}")
+    _index()
+
+
+def add_service(args):
+    svc_id = args.get("--id", "")
+    svc_name = args.get("--name", "")
+    svc_host = args.get("--host", "")
+    if not svc_id or not svc_name or not svc_host:
+        print("错误: --id --name --host 必填")
+        sys.exit(1)
+
+    data = _topo_data()
+    if any(s["id"] == svc_id for s in data.get("services", [])):
+        print(f"错误: service_id '{svc_id}' 已存在")
+        sys.exit(1)
+    if not any(h["id"] == svc_host for h in data.get("hosts", [])):
+        print(f"警告: host '{svc_host}' 不存在于拓扑中，请先 add-host")
+
+    entry = {"id": svc_id, "name": svc_name, "deploys_on": svc_host}
+
+    ports = args.get("--port", "")
+    if ports:
+        entry["ports"] = [int(p) for p in ports.split(",") if p.strip()]
+
+    calls = []
+    call_strs = args.get("--call", [])
+    if isinstance(call_strs, str):
+        call_strs = [call_strs]
+    for cs in call_strs:
+        parts = cs.split(":")
+        calls.append({
+            "target": parts[0],
+            "protocol": parts[1] if len(parts) > 1 else "tcp",
+            "port": int(parts[2]) if len(parts) > 2 else 0,
+        })
+    if calls:
+        entry["calls"] = calls
+
+    data.setdefault("services", []).append(entry)
+    _save_topo(data)
+    _api_post("/reload-topology", {})
+    print(f"服务已添加: {svc_id} ({svc_name}) -> host {svc_host}")
+    # Create empty tech doc
+    write_tech(svc_id, "（待填写）")
+
+
+def delete_service(service_id):
+    data = _topo_data()
+    svcs = [s for s in data.get("services", []) if s["id"] == service_id]
+    if not svcs:
+        print(f"错误: service_id '{service_id}' 不存在")
+        sys.exit(1)
+
+    # Remove from topology
+    data["services"] = [s for s in data["services"] if s["id"] != service_id]
+    # Remove calls targeting this service
+    for s in data["services"]:
+        s["calls"] = [c for c in s.get("calls", []) if c["target"] != service_id]
+    _save_topo(data)
+
+    # Remove docs dir
+    for svc in svcs:
+        dirpath = os.path.join(SERVICES_DIR, f"{service_id}-{svc.get('name', service_id)}")
+        if os.path.isdir(dirpath):
+            shutil.rmtree(dirpath)
+            print(f"文档目录已删除: {dirpath}")
+
+    # Delete from ES
+    doc_ids_to_clean = []
+    try:
+        from elasticsearch import Elasticsearch
+        es = Elasticsearch("http://localhost:9200")
+        # Get doc_ids before deleting
+        resp = es.search(index="knowledge_base", body={
+            "size": 100,
+            "query": {"term": {"service_ids": service_id}},
+            "_source": ["doc_id"],
+        })
+        for hit in resp["hits"]["hits"]:
+            did = hit["_source"].get("doc_id", "")
+            if did:
+                doc_ids_to_clean.append(did)
+        doc_ids_to_clean = list(set(doc_ids_to_clean))
+        # Delete from ES
+        es.delete_by_query(index="knowledge_base", body={"query": {"term": {"service_ids": service_id}}})
+        print(f"ES 中 service_ids 含 {service_id} 的文档已删除")
+    except ImportError:
+        print("无法连接 ES（容器外部运行），跳过 ES 删除，仅清理文档和拓扑")
+
+    # Cleanup Neo4j Document nodes via API
+    for doc_id in doc_ids_to_clean:
+        _api_post("/reload-topology", {})
+        break  # reload-topology already wipes all, only call once
+    if doc_ids_to_clean:
+        print(f"Neo4j Document 节点已清理: {len(doc_ids_to_clean)} 个")
+    _index()
+
+
+def add_host(args):
+    host_id = args.get("--id", "")
+    host_name = args.get("--name", "")
+    ip = args.get("--ip", "")
+    os_name = args.get("--os", "")
+    if not host_id or not host_name or not ip:
+        print("错误: --id --name --ip 必填")
+        sys.exit(1)
+
+    data = _topo_data()
+    if any(h["id"] == host_id for h in data.get("hosts", [])):
+        print(f"错误: host_id '{host_id}' 已存在")
+        sys.exit(1)
+    if any(h.get("ip") == ip for h in data.get("hosts", [])):
+        print(f"错误: IP '{ip}' 已被 {[h['id'] for h in data['hosts'] if h.get('ip')==ip]} 使用")
+        sys.exit(1)
+
+    entry = {"id": host_id, "name": host_name, "ip": ip}
+    if os_name:
+        entry["os"] = os_name
+    data.setdefault("hosts", []).append(entry)
+    _save_topo(data)
+    _api_post("/reload-topology", {})
+    print(f"主机已添加: {host_id} ({host_name}) {ip}")
+    _index()
+
+
+def update_node(label: str, node_id: str, key: str, value: str):
+    """Update any node property via PATCH /node/{label}/{id}.
+    Labels: Service, Host, Port, Document, Cluster."""
+    import urllib.request, urllib.error
+    # Auto-convert numeric values
+    try:
+        typed_value = int(value)
+    except ValueError:
+        typed_value = value
+    payload = json.dumps({key: typed_value}).encode()
+    req = urllib.request.Request(
+        f"{API}/node/{label}/{node_id}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="PATCH",
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        print(json.dumps(json.loads(resp.read()), indent=2, ensure_ascii=False))
+    except urllib.error.HTTPError as e:
+        print(f"错误: {e.code} — {e.read().decode()[:200]}")
+        sys.exit(1)
+
+
+def index(full=False):
+    _index(full=full)
+
+
+def index_file(rel_path):
+    _api_post("/index-file", {"file_path": rel_path})
+
+
+def cluster(service_id):
+    resp = urllib.request.urlopen(f"{API}/cluster/{service_id}", timeout=10)
+    r = json.loads(resp.read())
+    c = r.get("cluster") or {}
+    if not c:
+        print(f"{service_id}: 无集群信息")
+        return
+    print(f"集群: {c.get('name', service_id)}")
+    print(f"VIP: {c.get('vip', '无')}")
+    print("成员:")
+    for m in c.get("members", []):
+        print(f"  {m['host_id']} ({m['role']}): {m['ip']}")
+
+
+def service_docs(service_id):
+    resp = urllib.request.urlopen(f"{API}/service/{service_id}/docs", timeout=10)
+    r = json.loads(resp.read())
+    print(f"{service_id} 关联文档 ({r.get('count', 0)}):")
+    for d in r.get("docs", []):
+        print(f"  [{d.get('doc_type', '?')}] {d['title']} (relevance: {d.get('relevance', '?')})")
+
+
+def doc_services(doc_id):
+    resp = urllib.request.urlopen(f"{API}/document/{doc_id}/services", timeout=10)
+    r = json.loads(resp.read())
+    print(f"{doc_id} 关联服务 ({r.get('count', 0)}):")
+    for s in r.get("services", []):
+        print(f"  {s['service_id']} ({s['service_name']}) — relevance: {s.get('relevance', '?')}")
+
+
+def host_docs(host_id):
+    resp = urllib.request.urlopen(f"{API}/host/{host_id}/docs", timeout=10)
+    r = json.loads(resp.read())
+    print(f"{host_id} 关联文档 ({r.get('count', 0)}):")
+    for d in r.get("docs", []):
+        print(f"  [{d.get('doc_type', '?')}] {d['title']} (relevance: {d.get('relevance', '?')})")
+
+
+def doc_hosts(doc_id):
+    resp = urllib.request.urlopen(f"{API}/document/{doc_id}/hosts", timeout=10)
+    r = json.loads(resp.read())
+    print(f"{doc_id} 关联主机 ({r.get('count', 0)}):")
+    for h in r.get("hosts", []):
+        print(f"  {h['host_id']} ({h['host_name']}) — ip: {h.get('ip', '?')}, relevance: {h.get('relevance', '?')}")
+
+
+def sync_health():
+    resp = urllib.request.urlopen(f"{API}/health/sync", timeout=30)
+    r = json.loads(resp.read())
+    print(f"ES ↔ Neo4j 同步状态: {r.get('status', 'unknown')}")
+    print(f"  孤儿文档(Neo4j有ES无): {len(r.get('orphan_docs', []))}")
+    print(f"  悬空引用(ES有Neo4j无): {len(r.get('dangling_doc_refs', []))}")
+    print(f"  缺边(HAS_DOC指向不存在): {len(r.get('missing_doc_edges', []))}")
+    print(f"  集群问题: {len(r.get('cluster_issues', []))}")
+    print(f"  ES文档数: {r.get('stats', {}).get('es_docs', '?')}")
+    print(f"  Neo4j文档数: {r.get('stats', {}).get('neo4j_docs', '?')}")
+    if r.get('partial'):
+        print("  (扫描部分完成，部分结果不完整)")
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+
+    cmd = sys.argv[1]
+    try:
+        if cmd == "query":
+            query(sys.argv[2] if len(sys.argv) > 2 else "")
+        elif cmd == "topology":
+            topology(sys.argv[2])
+        elif cmd == "impact":
+            impact(sys.argv[2])
+        elif cmd == "path":
+            graph_path(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 3)
+        elif cmd == "circular":
+            circular()
+        elif cmd == "health":
+            health()
+        elif cmd == "metrics":
+            metrics()
+        elif cmd == "write-sop":
+            _write_cmd(sys.argv, write_sop, 3)
+        elif cmd == "write-tech":
+            _write_cmd(sys.argv, write_tech, 2)
+        elif cmd == "write-incident":
+            _write_cmd(sys.argv, write_incident, 2)
+        elif cmd == "add-service":
+            args = {}
+            i = 2
+            while i < len(sys.argv):
+                if sys.argv[i].startswith("--"):
+                    key = sys.argv[i]
+                    vals = []
+                    i += 1
+                    while i < len(sys.argv) and not sys.argv[i].startswith("--"):
+                        vals.append(sys.argv[i])
+                        i += 1
+                    args[key] = vals[0] if len(vals) == 1 else vals
+                else:
+                    i += 1
+            add_service(args)
+        elif cmd == "delete-service":
+            delete_service(sys.argv[2])
+        elif cmd == "update-node":
+            if len(sys.argv) < 6:
+                print("用法: aiops-query update-node <Label> <node_id> <key> <value>")
+                print("示例: aiops-query update-node Host host_nginx_01 os 'Ubuntu 22.04'")
+                print("       aiops-query update-node Service svc_nginx status active")
+                print("       aiops-query update-node Port 9200 protocol tcp")
+                print("       aiops-query update-node Cluster svc_nginx_company vip 10.33.16.250")
+                print("       aiops-query update-node Document svc_nginx_tech-arch title '新标题'")
+                print("有效 Labels: Service, Host, Port, Document, Cluster")
+                sys.exit(1)
+            update_node(sys.argv[2], sys.argv[3], sys.argv[4], " ".join(sys.argv[5:]))
+        elif cmd == "add-host":
+            args = {}
+            i = 2
+            while i < len(sys.argv):
+                if sys.argv[i].startswith("--"):
+                    key = sys.argv[i]
+                    vals = []
+                    i += 1
+                    while i < len(sys.argv) and not sys.argv[i].startswith("--"):
+                        vals.append(sys.argv[i])
+                        i += 1
+                    args[key] = vals[0] if len(vals) == 1 else vals
+                else:
+                    i += 1
+            add_host(args)
+        elif cmd == "index":
+            if len(sys.argv) > 2 and sys.argv[2] == "--full":
+                index(full=True)
+            else:
+                index()
+        elif cmd == "index-file":
+            if len(sys.argv) < 3:
+                print("用法: aiops-query index-file <relpath>")
+                print("示例: aiops-query index-file services/svc_nginx_company-company-nginx-cluster/tech-arch.md")
+                sys.exit(1)
+            index_file(sys.argv[2])
+        elif cmd == "cluster":
+            cluster(sys.argv[2] if len(sys.argv) > 2 else "")
+        elif cmd == "service-docs":
+            service_docs(sys.argv[2] if len(sys.argv) > 2 else "")
+        elif cmd == "doc-services":
+            doc_services(sys.argv[2] if len(sys.argv) > 2 else "")
+        elif cmd == "host-docs":
+            host_docs(sys.argv[2] if len(sys.argv) > 2 else "")
+        elif cmd == "doc-hosts":
+            doc_hosts(sys.argv[2] if len(sys.argv) > 2 else "")
+        elif cmd == "sync-health":
+            sync_health()
+        else:
+            # Default: treat whole input as query
+            query(" ".join(sys.argv[1:]))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)

@@ -1,0 +1,67 @@
+[
+  {
+    "query": "nginx 502 怎么排查",
+    "should_trigger": true,
+    "reason": "故障排查 — 应触发 aiops-rag"
+  },
+  {
+    "query": "帮我写个 nginx 重启 SOP",
+    "should_trigger": true,
+    "reason": "编写 SOP — 应触发 aiops-rag"
+  },
+  {
+    "query": "order-service 部署在哪台机器",
+    "should_trigger": true,
+    "reason": "服务拓扑查询 — 应触发 aiops-rag"
+  },
+  {
+    "query": "nginx 依赖哪些后端服务",
+    "should_trigger": true,
+    "reason": "依赖链查询 — 应触发 aiops-rag"
+  },
+  {
+    "query": "Redis 怎么扩容",
+    "should_trigger": true,
+    "reason": "SOP 查询 — 应触发 aiops-rag"
+  },
+  {
+    "query": "服务延时很高 帮我看看",
+    "should_trigger": true,
+    "reason": "故障排查（延时）— 应触发 aiops-rag"
+  },
+  {
+    "query": "加个新服务到知识库 叫 api-gateway",
+    "should_trigger": true,
+    "reason": "知识库维护 — 应触发 aiops-rag"
+  },
+  {
+    "query": "帮我记录一个故障 nginx 连不上后端了",
+    "should_trigger": true,
+    "reason": "故障记录 — 应触发 aiops-rag"
+  },
+  {
+    "query": "prod-app-01 挂了会影响什么服务",
+    "should_trigger": true,
+    "reason": "主机故障影响分析 — 应触发 aiops-rag"
+  },
+  {
+    "query": "写一个 Python 脚本来处理 CSV 文件",
+    "should_trigger": false,
+    "reason": "纯开发任务 — 不应触发 aiops-rag"
+  },
+  {
+    "query": "帮我查一下天气预报",
+    "should_trigger": false,
+    "reason": "无关查询 — 不应触发 aiops-rag"
+  },
+  {
+    "query": "Docker 怎么构建镜像",
+    "should_trigger": false,
+    "reason": "通用教程查询 — 不应触发 aiops-rag"
+  },
+  {
+    "query": "帮我分析一下这段代码的性能",
+    "should_trigger": false,
+    "reason": "代码分析 — 不应触发 aiops-rag"
+  }
+]

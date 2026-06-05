@@ -1,0 +1,419 @@
+services:
+- id: svc_es
+  name: elasticsearch
+  deploys_on: host_es_master_01
+  calls:
+  - target: svc_es
+    protocol: http
+    port: 9300
+  ports:
+  - 9200
+  - 9300
+  cluster_nodes:
+  - host: host_es_master_01
+    role: Master + Kibana
+    ip: 10.33.17.100
+  - host: host_es_master_02
+    role: Master
+    ip: 10.33.17.101
+  - host: host_es_master_03
+    role: Master
+    ip: 10.33.17.102
+  - host: host_es_data_01
+    role: Data
+    ip: 10.33.17.103
+  - host: host_es_data_02
+    role: Data
+    ip: 10.33.17.104
+- id: svc_kibana
+  name: kibana
+  deploys_on: host_es_master_01
+  calls:
+  - target: svc_es
+    protocol: http
+    port: 9200
+  ports:
+  - 5601
+- id: svc_logstash
+  name: logstash
+  deploys_on: host_logstash_01
+  calls:
+  - target: svc_es
+    protocol: http
+    port: 9200
+  ports:
+  - 5044
+  cluster_nodes:
+  - host: host_logstash_01
+    ip: 10.33.17.105
+    role: Syslog + Beats 入口
+  - host: host_logstash_02
+    ip: 10.33.17.106
+    role: Syslog + Beats 入口
+- id: svc_syslog
+  name: syslog-input
+  deploys_on: host_logstash_01
+  calls:
+  - target: svc_logstash
+    protocol: tcp
+    port: 5044
+  ports:
+  - 5514
+  - 514
+- id: svc_beats
+  name: beats-input
+  deploys_on: host_logstash_01
+  calls:
+  - target: svc_logstash
+    protocol: tcp
+    port: 5044
+  ports:
+  - 5555
+- id: svc_logstash_vip
+  name: logstash-vip
+  deploys_on: host_logstash_vip
+  ports:
+  - 5514
+  - 514
+  - 5555
+  calls:
+  - target: svc_logstash
+    protocol: udp
+    port: 5514
+  - target: svc_logstash
+    protocol: udp
+    port: 514
+  - target: svc_logstash
+    protocol: tcp
+    port: 5555
+- id: svc_nginx_company
+  name: company-nginx-cluster
+  deploys_on: host_nginx_01
+  ports:
+  - 80
+  - 443
+  - 9999
+  cluster_nodes:
+  - host: host_nginx_01
+    role: 主节点
+    ip: 10.33.16.42
+  - host: host_nginx_02
+    role: 从节点
+    ip: 10.33.16.43
+  - host: host_nginx_vip
+    role: VIP 负载均衡
+    ip: 10.33.16.244
+  calls:
+  - target: svc_app01
+    protocol: http
+    port: 9999
+  - target: svc_app02
+    protocol: http
+    port: 9999
+- id: svc_app01
+  name: K3Cloud应用服务01
+  deploys_on: host_app01
+  ports:
+  - 9999
+  - 8088
+  calls:
+  - target: svc_db_alwayson
+    protocol: tcp
+    port: 1433
+  - target: svc_file_server
+    protocol: tcp
+    port: 8088
+  - target: svc_mgmt_center
+    protocol: tcp
+    port: 8000
+  - target: svc_erp_relay_main
+    protocol: tcp
+    port: 8088
+  - target: svc_qys_relay_main
+    protocol: tcp
+    port: 5962
+  - target: svc_tianqu_relay_main
+    protocol: tcp
+    port: 5962
+  description: K3Cloud 应用服务，ERP 应用层，部署于 Windows Server
+- id: svc_app02
+  name: K3Cloud应用服务02
+  deploys_on: host_app02
+  ports:
+  - 9599
+  - 8088
+  calls:
+  - target: svc_db_alwayson
+    protocol: tcp
+    port: 1433
+  - target: svc_file_server
+    protocol: tcp
+    port: 8088
+  - target: svc_mgmt_center
+    protocol: tcp
+    port: 8000
+  - target: svc_erp_relay_main
+    protocol: tcp
+    port: 8088
+  - target: svc_qys_relay_main
+    protocol: tcp
+    port: 5962
+  - target: svc_tianqu_relay_main
+    protocol: tcp
+    port: 5962
+  description: K3Cloud 应用服务，ERP 应用层，部署于 Windows Server
+- id: svc_file_server
+  name: 文件服务器
+  deploys_on: host_file
+  ports:
+  - 80
+  - 8088
+  calls:
+  - target: svc_mgmt_center
+    protocol: tcp
+    port: 8000
+- id: svc_mgmt_center
+  name: 管理中心服务
+  deploys_on: host_mgmt
+  ports:
+  - 8000
+- id: svc_db_alwayson
+  name: SQLServer AlwaysOn 集群
+  deploys_on: host_db_master
+  ports:
+  - 1433
+  cluster_nodes:
+  - host: host_db_master
+    role: 主节点（Master）
+    ip: 10.33.17.124
+    port: 1433
+  - host: host_db_slave
+    role: 从节点（slave）
+    ip: 10.33.17.125
+    port: 1433
+  - host: host_db_backup
+    role: 备份节点（Backup）
+    ip: 10.33.17.126
+    port: 1433
+- id: svc_erp_relay_main
+  name: ERP消息推送中转服务-主
+  deploys_on: host_erp_relay_main
+  ports:
+  - 8088
+  calls:
+  - target: svc_db_alwayson
+    protocol: tcp
+    port: 1433
+  cluster_nodes:
+  - host: host_erp_relay_main
+    role: 主节点
+    ip: 10.33.16.58
+    port: 8088
+  - host: host_erp_relay_backup
+    role: 备节点（日常不启用）
+    ip: 10.33.16.63
+    port: 8088
+- id: svc_erp_relay_backup
+  name: ERP消息推送中转服务-备
+  deploys_on: host_erp_relay_backup
+  ports:
+  - 8088
+  calls:
+  - target: svc_db_alwayson
+    protocol: tcp
+    port: 1433
+- id: svc_qys_relay_main
+  name: 契约锁中转服务-主
+  deploys_on: host_qys_relay_main
+  ports:
+  - 5962
+  calls:
+  - target: svc_db_alwayson
+    protocol: tcp
+    port: 1433
+  - target: svc_tianqu_relay_main
+    protocol: tcp
+    port: 5962
+  - target: svc_app01
+    protocol: http
+    port: 9999
+  cluster_nodes:
+  - host: host_qys_relay_main
+    role: 主节点
+    ip: 10.33.16.70
+    port: 5962
+  - host: host_qys_relay_backup
+    role: 备节点
+    ip: 10.33.16.71
+    port: 5962
+- id: svc_qys_relay_backup
+  name: 契约锁中转服务-备
+  deploys_on: host_qys_relay_backup
+  ports:
+  - 5962
+  calls:
+  - target: svc_db_alwayson
+    protocol: tcp
+    port: 1433
+- id: svc_tianqu_relay_main
+  name: 天枢中转服务-主
+  deploys_on: host_tianqu_relay_main
+  ports:
+  - 5962
+  calls:
+  - target: svc_db_alwayson
+    protocol: tcp
+    port: 1433
+  - target: svc_app01
+    protocol: http
+    port: 9999
+  cluster_nodes:
+  - host: host_tianqu_relay_main
+    role: 主节点
+    ip: 10.33.16.127
+    port: 5962
+  - host: host_tianqu_relay_backup
+    role: 备节点（日常不启用）
+    ip: 10.33.16.26
+    port: 5962
+- id: svc_tianqu_relay_backup
+  name: 天枢中转服务-备
+  deploys_on: host_tianqu_relay_backup
+  ports:
+  - 5962
+  calls:
+  - target: svc_db_alwayson
+    protocol: tcp
+    port: 1433
+- id: svc_k3s
+  name: k3s-cluster
+  deploys_on: host_k3s_master
+  ports:
+  - 6443
+  - 80
+  - 443
+  cluster_nodes:
+  - host: host_k3s_master
+    role: control-plane + etcd
+    ip: 10.33.16.202
+    cpu: 4
+    memory: 8GB
+  - host: host_k3s_node01
+    role: worker
+    ip: 10.33.16.203
+    cpu: 4
+    memory: 8GB
+  - host: host_k3s_node02
+    role: worker
+    ip: 10.33.16.204
+    cpu: 4
+    memory: 8GB
+  - host: host_k3s_gpu_node01
+    role: GPU worker
+    ip: 10.33.17.234
+    cpu: 48
+    memory: 257GB
+    gpu: NVIDIA x4
+  calls: []
+hosts:
+- id: host_es_master_01
+  name: master-1
+  ip: 10.33.17.100
+  os: CentOS 7
+- id: host_es_master_02
+  name: master-2
+  ip: 10.33.17.101
+  os: CentOS 7
+- id: host_es_master_03
+  name: master-3
+  ip: 10.33.17.102
+  os: CentOS 7
+- id: host_es_data_01
+  name: node-1
+  ip: 10.33.17.103
+  os: CentOS 7
+- id: host_es_data_02
+  name: node-2
+  ip: 10.33.17.104
+  os: CentOS 7
+- id: host_logstash_01
+  name: logstash-1
+  ip: 10.33.17.105
+  os: CentOS 7
+- id: host_logstash_02
+  name: logstash-2
+  ip: 10.33.17.106
+  os: CentOS 7
+- id: host_logstash_vip
+  name: logstash-vip
+  ip: 10.33.17.107
+  os: VIP
+- id: host_nginx_01
+  name: nginx-node-1
+  ip: 10.33.16.42
+  os: CentOS 7
+- id: host_nginx_02
+  name: nginx-node-2
+  ip: 10.33.16.43
+  os: CentOS 7
+- id: host_nginx_vip
+  name: nginx-vip
+  ip: 10.33.16.244
+  os: VIP
+- id: host_app01
+  name: 应用服务器01
+  ip: 10.33.17.120
+  os: Windows Server
+- id: host_app02
+  name: 应用服务器02
+  ip: 10.33.17.121
+  os: Windows Server
+- id: host_file
+  name: 文件服务器
+  ip: 10.33.17.122
+- id: host_mgmt
+  name: 管理中心
+  ip: 10.33.17.123
+- id: host_db_master
+  name: MSSQL-Master
+  ip: 10.33.17.124
+- id: host_db_slave
+  name: MSSQL-slave
+  ip: 10.33.17.125
+- id: host_db_backup
+  name: MSSQL-Backup
+  ip: 10.33.17.126
+- id: host_erp_relay_main
+  name: ERP中转服务-主
+  ip: 10.33.16.58
+- id: host_erp_relay_backup
+  name: ERP中转服务-备
+  ip: 10.33.16.63
+- id: host_qys_relay_main
+  name: 契约锁中转服务-主
+  ip: 10.33.16.70
+- id: host_qys_relay_backup
+  name: 契约锁中转服务-备
+  ip: 10.33.16.71
+- id: host_tianqu_relay_main
+  name: 天枢中转服务-主
+  ip: 10.33.16.127
+- id: host_tianqu_relay_backup
+  name: 天枢中转服务-备
+  ip: 10.33.16.26
+- id: host_k3s_master
+  name: k8s-master
+  ip: 10.33.16.202
+  os: Ubuntu 22.04
+- id: host_k3s_node01
+  name: k8s-node01
+  ip: 10.33.16.203
+  os: Ubuntu 22.04
+- id: host_k3s_node02
+  name: k8s-node02
+  ip: 10.33.16.204
+  os: Ubuntu 22.04
+- id: host_k3s_gpu_node01
+  name: k8s-gpu-node01
+  ip: 10.33.17.234
+  os: Ubuntu 22.04
