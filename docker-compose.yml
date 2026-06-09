@@ -2,6 +2,7 @@ services:
   elasticsearch:
     image: rag-es-ik:8.11.0
     container_name: rag-es
+    restart: unless-stopped
     environment:
       - node.name=es01
       - cluster.name=rag-cluster
@@ -28,6 +29,7 @@ services:
   neo4j:
     image: neo4j:5
     container_name: rag-neo4j
+    restart: unless-stopped
     environment:
       - NEO4J_AUTH=neo4j/rag-password
       - NEO4J_PLUGINS=["apoc"]
@@ -50,6 +52,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: rag-api
+    restart: unless-stopped
     network_mode: host
     environment:
       - ES_HOST=localhost
